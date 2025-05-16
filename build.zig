@@ -7,7 +7,7 @@ pub fn build(build_process: *std.Build) void {
 
     const optimize = build_process.standardOptimizeOption(.{});
 
-    const lib_mod = build_process.addModule("selvafat", .{
+    const lib_mod = build_process.addModule("SelvaFat", .{
         .root_source_file = build_process.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
