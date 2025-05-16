@@ -1,0 +1,35 @@
+
+# Binaries
+
+## Files without suffix (They are most likely ELF executables)
+*
+!*/
+!*.*
+
+## ELF Binaries
+*.a
+*.elf
+*.o
+*.so
+
+# COFF/PE Binaries
+*.dll
+*.exe
+*.lib
+
+## Disk Images
+*.bin
+*.img
+*.iso
+
+
+
+# Build Folders
+.zig-cache/
+zig-out/
+
+# Folder for compiled Add-Ons
+.addons/
+
+# Private Convenience Folder for withholding fi;es
+.private/
