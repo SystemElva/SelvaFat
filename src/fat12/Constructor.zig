@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Bootsector = @import("Header.zig").Bootsector;
+const Filesystem = @import("Filesystem.zig");
 
 const Self = @This();
 
@@ -10,7 +11,7 @@ const Self = @This();
 logical_sector_size: u16 = 512,
 
 /// Size of the partition in logical sectors.
-len_partition: u32,
+len_partition: usize,
 
 /// Number of logical sectors that form a clusters
 cluster_size: u8 = 4,
@@ -41,31 +42,30 @@ fat_size: u16 = 3,
 /// Path to the file containing the content for the reserved sectors.
 reserved_sector_content_path: []u8 = "",
 
-fn constructFat(
+allocator: std.mem.Allocator,
+
+fn writeFat(
     self: Self,
-    file: std.fs.File,
+    writer: std.io.AnyWriter,
 ) !void {
     var bytes: [512]u8 = .{0} ** (512);
     bytes[0] = 0xf8;
     bytes[1] = 0xff;
     bytes[2] = 0xff;
-    _ = try file.write(&bytes);
+    _ = try writer.write(&bytes);
 
     var fat_sector_index: u32 = 1;
     while (fat_sector_index < self.fat_size) {
         const zeroes: [512]u8 = .{0} ** 512;
-        _ = try file.write(&zeroes);
+        _ = try writer.write(&zeroes);
         fat_sector_index += 1;
     }
 }
 
-pub fn toFile(
+pub fn write(
     self: Self,
-    file: std.fs.File,
-    allocator: std.mem.Allocator,
+    writer: std.io.AnyWriter,
 ) !void {
-    var remaining_sectors: u32 = self.len_partition;
-
     const bootsector: Bootsector = .{
         .logical_sector_size = self.logical_sector_size,
         .cluster_size = self.cluster_size,
@@ -75,7 +75,8 @@ pub fn toFile(
         .fat_size = self.fat_size,
     };
 
-    _ = try file.write(&bootsector.serialize());
+    _ = try writer.write(&bootsector.serialize());
+
     if (self.num_reserved_sectors > 1) {
         const reserved_sectors_file = try std.fs.cwd().openFile(
             self.reserved_sector_content_path,
@@ -84,25 +85,125 @@ pub fn toFile(
         defer reserved_sectors_file.close();
 
         const reserved_region_capacity = (self.num_reserved_sectors - 1) * self.logical_sector_size;
-        var reserved_region: []u8 = try allocator.alloc(u8, reserved_region_capacity);
+        var reserved_region: []u8 = try self.allocator.alloc(u8, reserved_region_capacity);
         const byte_count = try reserved_sectors_file.read(reserved_region);
 
-        _ = try file.write(reserved_region[0..byte_count]);
+        _ = try writer.write(reserved_region[0..byte_count]);
     }
-    remaining_sectors -= self.num_reserved_sectors;
 
     var fat_index: u8 = 0;
     while (fat_index < self.num_fats) {
-        try self.constructFat(file);
+        try self.writeFat(writer);
         fat_index += 1;
     }
+}
 
-    remaining_sectors -= self.num_fats * self.fat_size;
+fn fillFile(
+    self: Self,
+    file: std.fs.File,
+) !void {
+    const entry_offset: usize = @intCast(try file.getPos());
 
-    var sector_index: u32 = 0;
-    while (sector_index < remaining_sectors) {
-        const zeroes: [512]u8 = .{0} ** 512;
-        _ = try file.write(&zeroes);
-        sector_index += 1;
+    const zeroed_sector = try self.allocator.alloc(
+        u8,
+        self.logical_sector_size,
+    );
+    defer self.allocator.free(zeroed_sector);
+    @memset(zeroed_sector, 0);
+
+    var logical_sector_index: usize = 0;
+    while (logical_sector_index < self.len_partition) {
+        _ = try file.write(zeroed_sector);
+        logical_sector_index += 1;
     }
+    try file.seekTo(entry_offset);
+}
+
+pub fn writeToFileAtOffset(
+    self: Self,
+    file: std.fs.File,
+    start_byte: usize,
+) !void {
+    const entry_position = try file.getPos();
+    try file.seekTo(start_byte);
+    try self.fillFile(file);
+
+    try self.write(
+        file.writer().any(),
+    );
+    try file.seekTo(entry_position);
+}
+
+pub fn writeToFile(
+    self: Self,
+    file: std.fs.File,
+) !void {
+    try self.writeToFileAtOffset(file, 0);
+
+    try self.write(
+        file.writer().any(),
+    );
+}
+
+pub fn writeToFileAtPathAtOffset(
+    self: Self,
+    path: []const u8,
+    start_byte: usize,
+) !void {
+    var absolute_path = path;
+    if (!std.fs.path.isAbsolute(path)) {
+        const work_folder = try std.fs.cwd().realpathAlloc(
+            self.allocator,
+            ".",
+        );
+        defer self.allocator.free(work_folder);
+
+        absolute_path = try std.fs.path.resolve(
+            self.allocator,
+            &[2][]const u8{ work_folder, path },
+        );
+    }
+    defer self.allocator.free(absolute_path);
+    var file = try std.fs.createFileAbsolute(
+        absolute_path,
+        .{ .read = true },
+    );
+    defer file.close();
+
+    const start_position = try file.getPos();
+    try file.seekTo(start_byte);
+
+    try self.writeToFileAtOffset(
+        file,
+        start_byte,
+    );
+    try file.seekTo(start_position);
+}
+
+pub fn writeToFileAtPath(
+    self: Self,
+    path: []const u8,
+) !void {
+    try self.writeToFileAtPathAtOffset(path, 0);
+}
+
+pub fn init(
+    num_sectors: usize,
+    sector_size: usize,
+    allocator: std.mem.Allocator,
+) Self {
+    return .{
+        .logical_sector_size = @intCast(sector_size),
+        .len_partition = num_sectors,
+        .allocator = allocator,
+    };
+}
+
+test "Write FAT12 Filesystem" {
+    const constructor = init(
+        2880,
+        512,
+        std.heap.smp_allocator,
+    );
+    try constructor.writeToFileAtPath("filesystem.img");
 }
